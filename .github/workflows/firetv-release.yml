@@ -1,0 +1,73 @@
+name: Build Release APK (test-signed)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          submodules: 'recursive'
+          fetch-depth: 0
+
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v5
+
+      - name: Create disposable test signing key
+        run: |
+          # Throwaway key, generated fresh in the runner for test signing only.
+          # Never stored, never committed; discarded with the runner.
+          keytool -genkeypair -v -keystore key.jks -storetype PKCS12 -alias firetv-test \
+            -keyalg RSA -keysize 4096 -validity 10000 \
+            -storepass firetvTest2026 -keypass firetvTest2026 \
+            -dname "CN=Shizuku-Next FireTV Test Key, OU=Testing, O=ShizukuNext, L=NA, ST=NA, C=US"
+          echo KEYSTORE_PASSWORD=firetvTest2026 > signing.properties
+          echo KEYSTORE_ALIAS=firetv-test >> signing.properties
+          echo KEYSTORE_ALIAS_PASSWORD=firetvTest2026 >> signing.properties
+          echo KEYSTORE_FILE=../key.jks >> signing.properties
+
+      - name: Accept Android SDK licenses
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
+
+      - name: Assemble release APK
+        run: |
+          echo 'org.gradle.caching=true' >> gradle.properties
+          echo 'org.gradle.parallel=true' >> gradle.properties
+          ./gradlew :manager:assembleRelease --stacktrace
+
+      - name: Lint NewApi gate (non-blocking)
+        continue-on-error: true
+        run: ./gradlew :manager:lintDebug --stacktrace
+
+      - name: Identify and verify artifact
+        run: |
+          FILE=$(ls manager/build/outputs/apk/release/*.apk | head -1)
+          APKSIGNER=$(ls "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -1)
+          {
+            echo "### Release APK (test-signed, disposable key)"
+            echo '```'
+            ls -l "$FILE"
+            sha256sum "$FILE"
+            "$APKSIGNER" verify --print-certs "$FILE" | grep -E "Verified using|certificate DN|SHA-256 digest"
+            "$ANDROID_HOME"/build-tools/*/aapt2 dump badging "$FILE" 2>/dev/null | grep -E "package:|sdkVersion:|targetSdkVersion:|leanback|uses-feature" | head -20
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload release APK
+        uses: actions/upload-artifact@v6
+        with:
+          name: shizuku-release-apk
+          path: manager/build/outputs/apk/release/*.apk
+          if-no-files-found: error
