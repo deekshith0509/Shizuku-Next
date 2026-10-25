@@ -1,0 +1,63 @@
+name: Build Debug APK (Fire TV)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ firetv ]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          submodules: 'recursive'
+          fetch-depth: 0
+
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v5
+
+      - name: Accept Android SDK licenses
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
+
+      - name: Assemble debug APK
+        run: |
+          echo 'org.gradle.caching=true' >> gradle.properties
+          echo 'org.gradle.parallel=true' >> gradle.properties
+          ./gradlew :manager:assembleDebug --stacktrace
+
+      - name: Lint NewApi gate (non-blocking baseline)
+        continue-on-error: true
+        run: ./gradlew :manager:lintDebug --stacktrace
+
+      - name: Identify artifact
+        id: apk
+        run: |
+          FILE=$(ls manager/build/outputs/apk/debug/*.apk | head -1)
+          echo "path=$FILE" >> "$GITHUB_OUTPUT"
+          echo "name=$(basename "$FILE")" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Debug APK"
+            echo '```'
+            ls -l "$FILE"
+            sha256sum "$FILE"
+            "$ANDROID_HOME"/build-tools/*/aapt2 dump badging "$FILE" 2>/dev/null | grep -E "package:|sdkVersion:|targetSdkVersion:|uses-feature|launchable-activity|application-label:" | head -60
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v6
+        with:
+          name: shizuku-debug-apk
+          path: manager/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
